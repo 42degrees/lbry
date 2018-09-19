@@ -29,9 +29,9 @@ STREAM_STAGES = [
 log = logging.getLogger(__name__)
 
 
-class GetStream(object):
-    def __init__(self, sd_identifier, session, exchange_rate_manager,
-                 max_key_fee, disable_max_key_fee, data_rate=None, timeout=None):
+class GetStream:
+    def __init__(self, sd_identifier, wallet, exchange_rate_manager, blob_manager, peer_finder, rate_limiter,
+                 payment_rate_manager, storage, max_key_fee, disable_max_key_fee, data_rate=None, timeout=None):
 
         self.timeout = timeout or conf.settings['download_timeout']
         self.data_rate = data_rate or conf.settings['data_rate']
@@ -41,11 +41,14 @@ class GetStream(object):
         self.timeout_counter = 0
         self.code = None
         self.sd_hash = None
-        self.session = session
-        self.wallet = self.session.wallet
+        self.blob_manager = blob_manager
+        self.peer_finder = peer_finder
+        self.rate_limiter = rate_limiter
+        self.wallet = wallet
         self.exchange_rate_manager = exchange_rate_manager
-        self.payment_rate_manager = self.session.payment_rate_manager
+        self.payment_rate_manager = payment_rate_manager
         self.sd_identifier = sd_identifier
+        self.storage = storage
         self.downloader = None
         self.checker = LoopingCall(self.check_status)
 
@@ -159,7 +162,7 @@ class GetStream(object):
     @defer.inlineCallbacks
     def _initialize(self, stream_info):
         # Set sd_hash and return key_fee from stream_info
-        self.sd_hash = stream_info.source_hash
+        self.sd_hash = stream_info.source_hash.decode()
         key_fee = None
         if stream_info.has_fee:
             key_fee = yield self.check_fee_and_convert(stream_info.source_fee)
@@ -174,15 +177,17 @@ class GetStream(object):
 
     @defer.inlineCallbacks
     def _download_sd_blob(self):
-        sd_blob = yield download_sd_blob(self.session, self.sd_hash,
-                                         self.payment_rate_manager, self.timeout)
+        sd_blob = yield download_sd_blob(
+            self.sd_hash, self.blob_manager, self.peer_finder, self.rate_limiter, self.payment_rate_manager,
+            self.wallet, self.timeout, conf.settings['download_mirrors']
+        )
         defer.returnValue(sd_blob)
 
     @defer.inlineCallbacks
     def _download(self, sd_blob, name, key_fee, txid, nout, file_name=None):
         self.downloader = yield self._create_downloader(sd_blob, file_name=file_name)
         yield self.pay_key_fee(key_fee, name)
-        yield self.session.storage.save_content_claim(self.downloader.stream_hash, "%s:%i" % (txid, nout))
+        yield self.storage.save_content_claim(self.downloader.stream_hash, "%s:%i" % (txid, nout))
         log.info("Downloading lbry://%s (%s) --> %s", name, self.sd_hash[:6], self.download_path)
         self.finished_deferred = self.downloader.start()
         self.finished_deferred.addCallbacks(lambda result: self.finish(result, name), self.fail)
